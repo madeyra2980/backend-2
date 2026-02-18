@@ -1,0 +1,24 @@
+# Dependencies
+node_modules/
+
+# Environment variables (секреты — не коммитить)
+.env
+.env.local
+.env.*.local
+.env.example
+
+# Uploads
+uploads/
+
+# Токены приложения (локальный файл)
+data/
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# OS
+.DS_Store
+Thumbs.db
