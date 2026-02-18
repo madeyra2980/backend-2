@@ -66,6 +66,18 @@ configurePassport();
 // Для Flutter: установить req.user из Bearer-токена, если передан
 app.use(setUserFromToken);
 
+// Лог редиректов: статус 301/302/307/308 и заголовок Location
+app.use((req, res, next) => {
+  res.on('finish', () => {
+    const status = res.statusCode;
+    const location = res.get('Location');
+    if ((status === 301 || status === 302 || status === 307 || status === 308) && location) {
+      console.log(`[Redirect] ${status} ${req.method} ${req.originalUrl} -> ${location}`);
+    }
+  });
+  next();
+});
+
 // Роуты
 app.use('/auth', authRoutes);
 app.use('/profile', profileRoutes);
