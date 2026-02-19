@@ -235,4 +235,12 @@ ALTER TABLE orders ADD COLUMN IF NOT EXISTS customer_location_updated_at TIMESTA
 
 COMMENT ON COLUMN orders.customer_latitude IS 'Текущая широта клиента (отправляется клиентом в реальном времени)';
 COMMENT ON COLUMN orders.customer_longitude IS 'Текущая долгота клиента';
+
+-- -----------------------------------------------------------------------------
+-- 017: Город проживания пользователя (для автофильтра поиска специалистов)
+-- -----------------------------------------------------------------------------
+ALTER TABLE users ADD COLUMN IF NOT EXISTS city VARCHAR(255);
+
+COMMENT ON COLUMN users.city IS 'Город проживания пользователя (используется для автоматического поиска специалистов в своём городе)';
+CREATE INDEX IF NOT EXISTS idx_users_city ON users(city) WHERE city IS NOT NULL;
 COMMENT ON COLUMN orders.customer_location_updated_at IS 'Время последнего обновления позиции клиента';

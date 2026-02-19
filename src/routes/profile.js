@@ -108,11 +108,11 @@ router.get('/me', requireAuth, async (req, res) => {
     let result;
     try {
       result = await query(
-        `SELECT 
+        `SELECT
           id, email, "firstName", "lastName", phone, document_photo, avatar, google_avatar,
           rating, account_id, is_specialist as "isSpecialist", specialist_bio as "specialistBio",
           specialist_since as "specialistSince", specialist_specialties as "specialistSpecialties",
-          specialist_city as "specialistCity",
+          specialist_city as "specialistCity", city,
           "createdAt", "updatedAt"
         FROM users WHERE id = $1`,
         [userId]
@@ -185,6 +185,7 @@ router.get('/me', requireAuth, async (req, res) => {
         specialistSince: user.specialistSince || null,
         specialistSpecialties: Array.isArray(user.specialistSpecialties) ? user.specialistSpecialties : [],
         specialistCity: user.specialistCity || null,
+        city: user.city || null,
         createdAt: user.createdAt,
         updatedAt: user.updatedAt,
       },
@@ -195,11 +196,11 @@ router.get('/me', requireAuth, async (req, res) => {
   }
 });
 
-// Обновить ФИО и телефон
+// Обновить ФИО, телефон и город
 router.put('/me', requireAuth, async (req, res) => {
   try {
     const userId = req.user.id;
-    const { firstName, lastName, phone } = req.body;
+    const { firstName, lastName, phone, city } = req.body;
 
     // Валидация
     if (firstName !== undefined && (!firstName || firstName.trim().length === 0)) {
@@ -231,6 +232,11 @@ router.put('/me', requireAuth, async (req, res) => {
       values.push(phone ? phone.trim() : null);
     }
 
+    if (city !== undefined) {
+      updates.push(`city = $${paramIndex++}`);
+      values.push(city ? String(city).trim() : null);
+    }
+
     if (updates.length === 0) {
       return res.status(400).json({ error: 'Нет полей для обновления' });
     }
@@ -257,6 +263,7 @@ router.put('/me', requireAuth, async (req, res) => {
         is_specialist as "isSpecialist",
         specialist_bio as "specialistBio",
         specialist_since as "specialistSince",
+        city,
         "createdAt",
         "updatedAt"
     `;
@@ -284,6 +291,10 @@ router.put('/me', requireAuth, async (req, res) => {
           snakeUpdates.push(`phone = $${snakeIndex++}`);
           snakeValues.push(phone ? phone.trim() : null);
         }
+        if (city !== undefined) {
+          snakeUpdates.push(`city = $${snakeIndex++}`);
+          snakeValues.push(city ? String(city).trim() : null);
+        }
         snakeUpdates.push(`updated_at = NOW()`);
         snakeValues.push(userId);
 
@@ -305,6 +316,7 @@ router.put('/me', requireAuth, async (req, res) => {
             is_specialist as "isSpecialist",
             specialist_bio as "specialistBio",
             specialist_since as "specialistSince",
+            city,
             created_at as "createdAt",
             updated_at as "updatedAt"
         `;
@@ -357,6 +369,7 @@ router.put('/me', requireAuth, async (req, res) => {
         isSpecialist: !!user.isSpecialist,
         specialistBio: user.specialistBio || null,
         specialistSince: user.specialistSince || null,
+        city: user.city || null,
         createdAt: user.createdAt,
         updatedAt: user.updatedAt,
       },
@@ -682,7 +695,25 @@ router.post('/me/document-photo', requireAuth, uploadDocument.single('document')
   }
 });
 
-// Обновить местоположение пользователя
+// Определить город по координатам через Nominatim (OpenStreetMap)
+async function detectCityByCoords(lat, lng) {
+  try {
+    const url = `https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lng}&format=json&accept-language=ru`;
+    const resp = await fetch(url, {
+      headers: { 'User-Agent': 'KomekApp/1.0' },
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!resp.ok) return null;
+    const data = await resp.json();
+    const addr = data.address || {};
+    // Nominatim возвращает city / town / village / county
+    return addr.city || addr.town || addr.village || addr.county || null;
+  } catch (_) {
+    return null;
+  }
+}
+
+// Обновить местоположение пользователя (автоматически определяет город)
 router.put('/location', requireAuth, async (req, res) => {
   try {
     const userId = req.user.id;
@@ -708,34 +739,49 @@ router.put('/location', requireAuth, async (req, res) => {
       return res.status(400).json({ error: 'Долгота должна быть от -180 до 180' });
     }
 
-    // Обновляем местоположение в базе данных
+    // Определяем город по координатам (фоновый запрос, не блокирует ответ при ошибке)
+    const detectedCity = await detectCityByCoords(lat, lng);
+
+    // Обновляем местоположение (и city если удалось определить)
     let result;
     try {
-      result = await query(
-        `UPDATE users 
-         SET latitude = $1, longitude = $2, location_updated_at = NOW(), "updatedAt" = NOW()
-         WHERE id = $3
-         RETURNING 
-           id, 
-           latitude, 
-           longitude, 
-           location_updated_at as "locationUpdatedAt"`,
-        [lat, lng, userId]
-      );
+      if (detectedCity) {
+        result = await query(
+          `UPDATE users
+           SET latitude = $1, longitude = $2, location_updated_at = NOW(), city = $4, "updatedAt" = NOW()
+           WHERE id = $3
+           RETURNING id, latitude, longitude, location_updated_at as "locationUpdatedAt", city`,
+          [lat, lng, userId, detectedCity]
+        );
+      } else {
+        result = await query(
+          `UPDATE users
+           SET latitude = $1, longitude = $2, location_updated_at = NOW(), "updatedAt" = NOW()
+           WHERE id = $3
+           RETURNING id, latitude, longitude, location_updated_at as "locationUpdatedAt", city`,
+          [lat, lng, userId]
+        );
+      }
     } catch (err) {
       // Если camelCase не работает, пробуем snake_case
       if (err.message.includes('column') && err.message.includes('does not exist')) {
-        result = await query(
-          `UPDATE users 
-           SET latitude = $1, longitude = $2, location_updated_at = NOW(), updated_at = NOW()
-           WHERE id = $3
-           RETURNING 
-             id, 
-             latitude, 
-             longitude, 
-             location_updated_at as "locationUpdatedAt"`,
-          [lat, lng, userId]
-        );
+        if (detectedCity) {
+          result = await query(
+            `UPDATE users
+             SET latitude = $1, longitude = $2, location_updated_at = NOW(), city = $4, updated_at = NOW()
+             WHERE id = $3
+             RETURNING id, latitude, longitude, location_updated_at as "locationUpdatedAt", city`,
+            [lat, lng, userId, detectedCity]
+          );
+        } else {
+          result = await query(
+            `UPDATE users
+             SET latitude = $1, longitude = $2, location_updated_at = NOW(), updated_at = NOW()
+             WHERE id = $3
+             RETURNING id, latitude, longitude, location_updated_at as "locationUpdatedAt", city`,
+            [lat, lng, userId]
+          );
+        }
       } else {
         throw err;
       }
@@ -751,6 +797,7 @@ router.put('/location', requireAuth, async (req, res) => {
         longitude: parseFloat(result.rows[0].longitude),
         updatedAt: result.rows[0].locationUpdatedAt,
       },
+      city: result.rows[0].city ?? null,
       message: 'Местоположение успешно обновлено',
     });
   } catch (error) {
@@ -857,16 +904,37 @@ router.get('/locations', requireAuth, async (req, res) => {
   }
 });
 
-// Список специалистов с рейтингом (для раздела «Специалисты»). Поиск по городу: ?city=...
+// Список специалистов с рейтингом (для раздела «Специалисты»).
+// Поиск по городу: ?city=... или автоматически по городу текущего пользователя.
+// Передать ?city=all чтобы получить всех специалистов без фильтра по городу.
 router.get('/specialists', requireAuth, async (req, res) => {
   try {
-    const city = typeof req.query.city === 'string' ? req.query.city.trim() : null;
-    const hasCityFilter = city && city.length > 0;
+    const userId = req.user.id;
+    let city = typeof req.query.city === 'string' ? req.query.city.trim() : null;
+    const showAll = city === 'all';
+
+    // Если город не передан явно — берём город текущего пользователя
+    if (!city && !showAll) {
+      try {
+        const userRow = await query(
+          `SELECT city FROM users WHERE id = $1`,
+          [userId]
+        );
+        const userCity = userRow.rows[0]?.city ?? null;
+        if (userCity && userCity.trim().length > 0) {
+          city = userCity.trim();
+        }
+      } catch (_) {
+        // если колонки city ещё нет — игнорируем
+      }
+    }
+
+    const hasCityFilter = !showAll && city && city.length > 0;
     let result;
     try {
       if (hasCityFilter) {
         result = await query(
-          `SELECT 
+          `SELECT
             id, "firstName", "lastName", phone,
             rating, specialist_bio as "specialistBio", specialist_specialties as "specialistSpecialties",
             specialist_since as "specialistSince", specialist_city as "specialistCity",
@@ -878,7 +946,7 @@ router.get('/specialists', requireAuth, async (req, res) => {
         );
       } else {
         result = await query(
-          `SELECT 
+          `SELECT
             id, "firstName", "lastName", phone,
             rating, specialist_bio as "specialistBio", specialist_specialties as "specialistSpecialties",
             specialist_since as "specialistSince", specialist_city as "specialistCity",
@@ -913,10 +981,10 @@ router.get('/specialists', requireAuth, async (req, res) => {
         googleAvatar: row.googleAvatar ?? null,
       };
     });
-    res.json({ specialists, count: specialists.length });
+    res.json({ specialists, count: specialists.length, filteredByCity: hasCityFilter ? city : null });
   } catch (err) {
     if (err.code === '42703' || (err.message && String(err.message).includes('does not exist'))) {
-      return res.json({ specialists: [], count: 0 });
+      return res.json({ specialists: [], count: 0, filteredByCity: null });
     }
     console.error('Error fetching specialists:', err);
     res.status(500).json({ error: 'Ошибка при загрузке списка специалистов' });
